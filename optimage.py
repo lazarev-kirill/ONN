@@ -6,7 +6,6 @@ import cv2
 import matplotlib.pyplot as plt
 
 import torch as tp
-import torchvision as tv
 
 
 class OptImage:
@@ -259,30 +258,67 @@ class NumpyOptImage(OptImage):
 
 class TorchOptImage(OptImage):
     def __init__(self, image: tp.Tensor, wave_length: float, size: float) -> None:
+        if len(image.shape) > 3:
+            raise ValueError(
+                f"the image shape should have the form (x, y, z) or (x, y), but: {image.shape}"
+            )
         super().__init__(wave_length, size, image.shape)
         self.__image = image
 
     def __add__(self, other):
-        if isinstance(other, TorchLens):
-            if other.get_shape() != self.get_shape():
+        if isinstance(other, tp.nn.parameter.Parameter) or isinstance(other, tp.Tensor):
+            if (
+                other.shape[-1] != self.get_shape()[-1]
+                or other.shape[-2] != self.get_shape()[-2]
+            ):
                 raise ValueError(
-                    f"it is impossible to make an addition: the size of the parts to be folded must be the same, but: {other.get_shape()} and {self.get_shape()}"
+                    f"it is impossible to make an addition: the size of the parts to be folded must be the same, but: ({other.shape[-2]}, {other.shape[-1]}) and ({self.get_shape()[-2]}, {self.get_shape()[-1]})"
+                )
+            current_phase = self.get_phase()
+            current_amplitude = self.get_amplitude()
+            output = current_amplitude * tp.exp(1j * (current_phase + other))
+            return TorchOptImage(output, self.get_wave_length(), self.get_size())
+
+        elif isinstance(other, TorchLens):
+            if (
+                other.shape[-1] != self.get_shape()[-1]
+                or other.shape[-2] != self.get_shape()[-2]
+            ):
+                raise ValueError(
+                    f"it is impossible to make an addition: the size of the parts to be folded must be the same, but: ({other.shape[-2]}, {other.shape[-1]}) and ({self.get_shape()[-2]}, {self.get_shape()[-1]})"
                 )
             other_phase = other.get_phase()
             current_phase = self.get_phase()
             current_amplitude = self.get_amplitude()
             output = current_amplitude * tp.exp(1j * (current_phase + other_phase))
             return TorchOptImage(output, self.get_wave_length(), self.get_size())
+
         else:
             raise SyntaxError(
-                f"the second operand type is required to be a TorchLense, but: {type(other)}"
+                f"unsupported operand between types: {type(self)} and {type(other)}"
             )
 
     def __mul__(self, other):
-        if isinstance(other, TorchLens):
-            if other.get_shape() != self.get_shape():
+        if isinstance(other, tp.nn.parameter.Parameter) or isinstance(other, tp.Tensor):
+            if (
+                other.shape[-1] != self.get_shape()[-1]
+                or other.shape[-2] != self.get_shape()[-2]
+            ):
                 raise ValueError(
-                    f"it is impossible to make a multyply: the size of the parts to be folded must be the same, but: {other.get_shape()} and {self.get_shape()}"
+                    f"it is impossible to make a multyply: the size of the parts to be folded must be the same, but: ({other.shape[-2]}, {other.shape[-1]}) and ({self.get_shape()[-2]}, {self.get_shape()[-1]})"
+                )
+            current_phase = self.get_phase()
+            current_amplitude = self.get_amplitude()
+            output = (current_amplitude * other) * tp.exp(1j * (current_phase))
+            return TorchOptImage(output, self.get_wave_length(), self.get_size())
+
+        elif isinstance(other, TorchLens):
+            if (
+                other.shape[-1] != self.get_shape()[-1]
+                or other.shape[-2] != self.get_shape()[-2]
+            ):
+                raise ValueError(
+                    f"it is impossible to make a multyply: the size of the parts to be folded must be the same, but: ({other.shape[-2]}, {other.shape[-1]}) and ({self.get_shape()[-2]}, {self.get_shape()[-1]})"
                 )
             current_phase = self.get_phase()
             other_amplitude = other.get_amplitude()
@@ -291,9 +327,10 @@ class TorchOptImage(OptImage):
                 1j * (current_phase)
             )
             return TorchOptImage(output, self.get_wave_length(), self.get_size())
+
         else:
             raise SyntaxError(
-                f"the second operand type is required to be a TorchLense, but: {type(other)}"
+                f"unsupported operand between types: {type(self)} and {type(other)}"
             )
 
     def append_amplitude(self, src: tp.Tensor) -> None:
@@ -369,24 +406,36 @@ class TorchOptImage(OptImage):
         ----------
         `distance` : float - distance to the detector
         """
-        rows, cols = self.shape
+        new_image = tp.empty(
+            self.get_shape(), dtype=tp.complex64, device=self.__image.device
+        )
+        for i, channel in enumerate(self.__image):
+            rows, cols = channel.shape
 
-        x = tp.linspace(-self.size / 2, self.size / 2, rows)
-        y = tp.linspace(-self.size / 2, self.size / 2, cols)
-        X, Y = tp.meshgrid(x, y)
-        X = X.to(self.__image.device)
-        Y = Y.to(self.__image.device)
+            x = tp.linspace(-self.size / 2, self.size / 2, rows)
+            y = tp.linspace(-self.size / 2, self.size / 2, cols)
+            X, Y = tp.meshgrid(x, y, indexing="ij")
+            X = X.to(self.__image.device)
+            Y = Y.to(self.__image.device)
 
-        exp = -tp.exp(1j * tp.pi * (X**2 + Y**2) / (self.wave_length * distance))
-        exp_fft = tp.exp(1j * tp.pi * (X**2 + Y**2) / (self.wave_length * distance))
+            exp = -tp.exp(1j * tp.pi * (X**2 + Y**2) / (self.wave_length * distance))
+            exp_fft = tp.exp(1j * tp.pi * (X**2 + Y**2) / (self.wave_length * distance))
 
-        fft = tp.fft.fftshift(tp.fft.fft2(self.__image * exp_fft))
+            fft = tp.fft.fftshift(tp.fft.fft2(channel * exp_fft))
 
-        if self.shifted:
-            fft = tp.fft.fftshift(fft)
+            if self.shifted:
+                fft = tp.fft.fftshift(fft)
+
+            new_image[i] = exp * fft
 
         self.shifted = not self.shifted
-        self.__image = exp * fft
+        self.__image = new_image
+
+    def forward_fourier(self) -> None:
+        self.__image = tp.fft.fftshift(tp.fft.fft2(self.__image))
+
+    def lens_like_fourier(self) -> None:
+        self.__image = tp.fft.fft2(tp.fft.fft2(self.__image))
 
     def pad_zeros(self, shape: tuple) -> None:
         """
@@ -395,39 +444,46 @@ class TorchOptImage(OptImage):
         ----------
         `shape` : float - size of the augmented image in pixels [pixels]
         """
-        current_rows, current_cols = self.get_shape()
+        current_rows, current_cols = self.__image[0].shape
         new_cols, new_rows = shape
-        self.shape = shape
-
         top = (new_rows - current_rows) // 2
         bottom = top
         left = (new_cols - current_cols) // 2
         right = left
 
-        left_border = tp.zeros((current_rows, left), device=self.__image.device)
-        right_border = tp.zeros((current_rows, right), device=self.__image.device)
-        center = tp.hstack((left_border, self.__image, right_border))
-
-        top_center = tp.zeros((top, current_cols), device=self.__image.device)
-        bottom_center = tp.zeros((bottom, current_cols), device=self.__image.device)
-
-        top_left = tp.zeros((left, top), device=self.__image.device)
-        top_right = tp.zeros((right, top), device=self.__image.device)
-        bottom_left = tp.zeros((left, bottom), device=self.__image.device)
-        bottom_right = tp.zeros((right, bottom), device=self.__image.device)
-
-        top_border = tp.hstack((top_left, top_center, top_right))
-        bottom_border = tp.hstack((bottom_left, bottom_center, bottom_right))
-
-        self.__image = tp.vstack((top_border, center, bottom_border))
-
-        if self.__image.shape != self.shape:
-            self.shape = self.__image.shape
+        if (new_rows - current_rows) % 2 != 0 or (new_cols - current_cols) % 2 != 0:
+            shape = (shape[0] - 1, shape[1] - 1)
+            self.shape = (self.__image.shape[0], shape[0], shape[1])
             warn(
                 f"it is impossible to complete the image to the specified size, the current number of pixels: {self.shape}",
                 category=RuntimeWarning,
                 stacklevel=2,
             )
+
+        new_image = tp.empty(
+            (self.__image.shape[0], shape[0], shape[1]), device=self.__image.device
+        )
+
+        for i, channel in enumerate(self.__image):
+            self.shape = (self.__image.shape[0], shape[0], shape[1])
+            left_border = tp.zeros((current_rows, left), device=self.__image.device)
+            right_border = tp.zeros((current_rows, right), device=self.__image.device)
+            center = tp.hstack((left_border, channel, right_border))
+
+            top_center = tp.zeros((top, current_cols), device=self.__image.device)
+            bottom_center = tp.zeros((bottom, current_cols), device=self.__image.device)
+
+            top_left = tp.zeros((left, top), device=self.__image.device)
+            top_right = tp.zeros((right, top), device=self.__image.device)
+            bottom_left = tp.zeros((left, bottom), device=self.__image.device)
+            bottom_right = tp.zeros((right, bottom), device=self.__image.device)
+
+            top_border = tp.hstack((top_left, top_center, top_right))
+            bottom_border = tp.hstack((bottom_left, bottom_center, bottom_right))
+
+            new_image[i] = tp.vstack((top_border, center, bottom_border))
+
+        self.__image = new_image
 
     def imshow(
         self, parts: list = ["intensity", "amplitude", "phase"], cmap: str = "jet"
@@ -441,24 +497,45 @@ class TorchOptImage(OptImage):
         >>> import matploltib.pyplot as plt
         >>> print(plt.colormaps)
         """
-        num = len(parts)
-        for i, part in enumerate(parts):
-            plot_number = int(f"1{num}{i + 1}")
+        if len(self.shape) == 2:
+            num = len(parts)
+            for i, part in enumerate(parts):
+                plot_number = int(f"1{num}{i + 1}")
 
-            plt.subplot(plot_number)
-            plt.axis("off")
-            plt.title(part)
+                plt.subplot(plot_number)
+                plt.axis("off")
+                plt.title(part)
 
-            if part == "intensity":
-                plt.imshow(self.get_intensity().cpu().detach(), cmap=cmap)
-            elif part == "amplitude":
-                plt.imshow(self.get_amplitude().cpu().detach(), cmap=cmap)
-            elif part == "phase":
-                plt.imshow(self.get_phase().cpu().detach(), cmap=cmap)
-            else:
-                raise SyntaxError(
-                    "parts must be: 'intensity' or 'amplitude' or 'phase'"
-                )
+                if part == "intensity":
+                    plt.imshow(self.get_intensity().cpu().detach(), cmap=cmap)
+                elif part == "amplitude":
+                    plt.imshow(self.get_amplitude().cpu().detach(), cmap=cmap)
+                elif part == "phase":
+                    plt.imshow(self.get_phase().cpu().detach(), cmap=cmap)
+                else:
+                    raise SyntaxError(
+                        "parts must be: 'intensity' or 'amplitude' or 'phase'"
+                    )
+
+        else:
+            num = len(parts)
+            for i, part in enumerate(parts):
+                plot_number = int(f"1{num}{i + 1}")
+
+                plt.subplot(plot_number)
+                plt.axis("off")
+                plt.title(part)
+
+                if part == "intensity":
+                    plt.imshow(self.get_intensity().cpu().detach()[0], cmap=cmap)
+                elif part == "amplitude":
+                    plt.imshow(self.get_amplitude().cpu().detach()[0], cmap=cmap)
+                elif part == "phase":
+                    plt.imshow(self.get_phase().cpu().detach()[0], cmap=cmap)
+                else:
+                    raise SyntaxError(
+                        "parts must be: 'intensity' or 'amplitude' or 'phase'"
+                    )
         plt.show()
 
     def imwrite(self, path: str, cmap: str = "jet") -> None: ...  ### change
@@ -525,9 +602,12 @@ class TorchLens(Lens):
 
     def __add__(self, other):
         if isinstance(other, TorchOptImage):
-            if other.get_shape() != self.get_shape():
+            if (
+                other.get_shape()[-1] != self.get_shape()[-1]
+                or other.get_shape()[-2] != self.get_shape()[-2]
+            ):
                 raise ValueError(
-                    f"it is impossible to make an addition: the size of the parts to be folded must be the same, but: {other.get_shape()} and {self.get_shape()}"
+                    f"it is impossible to make an addition: the size of the parts to be folded must be the same, but: ({other.shape[-2]}, {other.shape[-1]}) and ({self.get_shape()[-2]}, {self.get_shape()[-1]})"
                 )
 
             other_phase = self.get_phase()
@@ -542,7 +622,10 @@ class TorchLens(Lens):
 
     def __mul__(self, other):
         if isinstance(other, TorchOptImage):
-            if other.get_shape() != self.get_shape():
+            if (
+                other.get_shape()[-1] != self.get_shape()[-1]
+                or other.get_shape()[-2] != self.get_shape()[-2]
+            ):
                 raise ValueError(
                     f"it is impossible to make a multyply: the size of the parts to be folded must be the same, but: {other.get_shape()} and {self.get_shape()}"
                 )
